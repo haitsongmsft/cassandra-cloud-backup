@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# Copyright 2016 Google Inc. All Rights Reserved.
+# Copyright 2018 Microsoft Inc. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -15,21 +15,21 @@
 # limitations under the License.
 #
 #
-# Description :  Take snapshot and incremental backups of Cassandra and copy them to Google Cloud Storage
+# Description :  Take snapshot and incremental backups of Cassandra and copy them to Azure Cloud Storage
 #                Optionally restore full system from snapshot
-# This is not an official Google product.
+# This is not an official Microsoft product.
 #
 VERSION='1.0'
-SCRIPT_NAME="cassandra-cloud-backup.sh"
+SCRIPT_NAME="cassandra-azure-backup.sh"
 #exit on any error
 set -e
 # Prints the usage for this script
 function print_usage() {
-  echo "Cassandra Backup to Google Cloud Storage Version: ${VERSION}"
+  echo "Cassandra Backup to Azure Cloud Storage Version: ${VERSION}"
   cat <<'EOF'
-Usage: ./cassandra-cloud-backup.sh [ options ] <command>
+Usage: ./cassandra-azure-backup.sh [ options ] <command>
 Description:
-  Utility for creating and managing Cassandra Backups with Google Cloud Storage.
+  Utility for creating and managing Cassandra Backups with Azure Cloud Storage.
   Run with admin level privileges.
 
   The backup command can use gzip or bzip2 for compression, and split large files
@@ -51,11 +51,17 @@ Flags:
     Specify an alternate server name to be used in the bucket path construction. Used
     to create or retrieve backups from different servers
 
+  -A  --az-storage
+    Azure storage account name, it can be put in a file to be used in the shell via -U, or environment variable AZURE_STORAGE_ACCOUNT
+
   -B, backup
     Default action is to take a backup
 
-  -b, --gcsbucket
-   Google Cloud Storage bucket used in deployment and by the cluster.
+  -b --backup-path
+    The file base path of the azure file share within the azure storage account. When doing backups, a fileshare
+    with name of "cassandradump" is created. The base path is host name, and snapshots storaged in the folder 
+    of "hostname/snpsht/date_snapshotid". In the resore case, it is expected to pass "hostname/date_snapshotid" for This
+    parameter
 
   -c, --clear-old-ss
     Clear any old SnapShots taken prior to this backup run to save space
@@ -70,7 +76,11 @@ Flags:
     has enough space and the appropriate permissions
 
   -D, --download-only
-    During a restore this will only download the target files from GCS
+    During a restore this will only download the target files from azure file share
+
+  -e, --endpoint-cqlsh
+    Endpoint IP of cqlsh, defaults to the first up node reported by nodetool. This is used when we 
+    need to obtain a copy of schema via running cqlsh.
 
   -f, --force
     Used to force the restore without confirmation prompt
@@ -88,7 +98,7 @@ Flags:
     be run when compression is enabled with -z or -j
 
   -j, --bzip
-    Compresses the backup files with bzip2 prior to pushing to Google Cloud Storage
+    Compresses the backup files with bzip2 prior to pushing to Azure Cloud Storage
     This option will use additional local disk space set the --target-gz-dir
     to use an alternate disk location if free space is an issue
 
@@ -96,6 +106,10 @@ Flags:
     Set this flag on restore to keep a local copy of the old data files
     Set this flag on backup to keep a local copy of the compressed backup, schema dump,
     and token ring
+
+  -K, --storage-key 
+    Either the sas token, or the account key for uploading to your storage accounts, it can be in a file with -U, or 
+    put in an environment Variable of AZURE_STORAGE_KEY
 
   -l, --log-dir
     Activate logging to file 'CassandraBackup${DATE}.log' from stdout
@@ -116,7 +130,7 @@ Flags:
     The Cassandra User Password if required for security
 
   -r,  restore
-    Restore a backup, requires a --gcsbucket path and optional --backupdir
+    Restore a backup, requires a --backup-path and optional --backupdir
 
   -s, --split-size
     Split the resulting tar archive into the configured size in Megabytes, default 100M
@@ -132,10 +146,13 @@ Flags:
     The Cassandra User account if required for security
 
   -U, --auth-file
-    A file that contains authentication credentials for cqlsh and nodetool consisting of
-    two lines:
+    A file that contains authentication credentials for cqlsh, nodetool, and azure connection string consisting of
+    these lines:
       CASSANDRA_USER=username
       CASSANDRA_PASS=password
+      AZURE_STORAGE_ACCOUNT=AzureStorageAccountName
+      AZURE_STORAGE_KEY=accountKeyIfUsed
+      AZURE_STORAGE_SAS_TOKEN=sasConnectionStringIfUsed
 
   -v, --verbose
     When provided will print additional information to log file
@@ -149,7 +166,7 @@ Flags:
     default: /etc/cassandra/cassandra.yaml
 
   -z, --zip
-    Compresses the backup files with gzip prior to pushing to Google Cloud Storage
+    Compresses the backup files with gzip prior to pushing to Azure Cloud Storage
     This option will use additional local disk space set the --target-gz-dir
     to use an alternate disk location if free space is an issue
 
@@ -169,27 +186,28 @@ options               list available options
 
 Examples:
   Take a full snapshot, gzip compress it with nice=15,
-  upload into the GCS Bucket, and clear old incremental and snapshot files
-  ./cassandra-cloud-backup.sh -b gs://cassandra-backups123/ -zCc -N 15 backup
+  upload into the azure blob, and clear old incremental and snapshot files
+  ./cassandra-azure-backup.sh -A myazstorageacct -K mystoragekey -zCc -N 15 backup
 
   Do a dry run of a full snapshot with verbose output and
   create list of files that would have been copied
-  ./cassandra-cloud-backup.sh -b gs://cassandra-backups123/ -vn backup
+  ./cassandra-azure-backup.sh -A myazstorageacct -K mystoragekey -vn backup
 
   Backup and bzip2 compress copies of the most recent incremental
   backup files since the last incremental backup
-  ./cassandra-cloud-backup.sh -b gs://cassandra-backups123/ -ji backup
+  ./cassandra-azure-backup.sh -A myazstorageacct -K mystoragekey -ji backup
 
   Restore a backup without prompting from specified bucket path and keep the old files locally
-  ./cassandra-cloud-backup.sh -b gs://cass-bk123/backups/host01/snpsht/2016-01-20_18-57/ -fk restore
+  ./cassandra-azure-backup.sh -A myazstorageacct -K mystoragekey -b host01/snpsht/2016-01-20_18-57/ -fk restore
 
   Restore a specific backup to a custom CASSANDRA_HOME directory with secure credentials in
   password.txt file with Cassandra running as a Linux service name cass
-  ./cassandra-cloud-backup.sh -b gs://cass-bk123/backups/host01/snpsht/2016-01-20_18-57/ \
+  ./cassandra-azure-backup.sh -A myazstorageacct -K mystoragekey -b host01/snpsht/2016-01-20_18-57/ \
    -y /opt/cass/conf/cassandra.yaml -H /opt/cass -U password.txt -S cass restore
 
-  List inventory of available backups stored in Google Cloud Store
-  ./cassandra-cloud-backup.sh -b gs://cass-bk123 inventory
+  List inventory of available backups stored in Azure Cloud Store
+  ./cassandra-azure-backup.sh -A myazstorageacct -K mystoragekey inventory
+  ./cassandra-azure-backup.sh -U mysetting.txt inventory
 
 EOF
 }
@@ -239,27 +257,70 @@ function print_help() {
   exit 1
 }
 
+# need a file share to storage the data, 
+# file share in the name of "cassandradump", and directory of the hostname by default.
+function ensure_az_fileshare_and_basedir() {
+  if ! ${AZUTIL} storage file list -s $AZURE_FS_NAME -p $AZURE_FS_DIR $AZURE_ACCT_KEY &> /dev/null; then
+      loginfo "creating file share $AZUTIL storage share create $AZURE_FS_NAME"
+      $AZUTIL storage share create -n $AZURE_FS_NAME $AZURE_ACCT_KEY
+      loginfo "creating file share $AZUTIL storage share create $AZURE_FS_NAME directory $AZURE_FS_DIR"
+      $AZUTIL storage directory create -n $AZURE_FS_DIR -s $AZURE_FS_NAME $AZURE_ACCT_KEY
+      checkfs=$($AZUTIL storage directory exists -n $AZURE_FS_DIR -s $AZURE_FS_NAME $AZURE_ACCT_KEY | grep true)
+      if [ ${#checkfs} -eq 0 ]; then
+          logerror "Cannot access Azure Cloud file share $AZURE_FS_NAME within file share of ${AZURE_STORAGE_ACCOUNT} make sure it exists"
+          exit 1
+      fi
+  fi
+}
+
+function prepare_az_storage() {
+  if [ -z ${AZUTIL} ]; then
+    logerror "Cannot find azure cli utility please make sure it is in the PATH"
+    exit 1
+  fi
+  if [ -z ${AZURE_STORAGE_KEY} ]; then
+    logerror "Please pass in the azure storage key to use with this script, can use -U or -K"
+    exit 1
+  fi
+  if [ -z ${AZURE_STORAGE_ACCOUNT} ]; then
+      logerror "Please pass in the azure storage account name to use with this script"
+      exit 1
+  fi
+  ensure_az_fileshare_and_basedir
+  loginfo "Checking ${AZUTIL} storage file list -s $AZURE_FS_NAME -p $AZURE_FS_DIR "
+  if ! ${AZUTIL} storage file list -s $AZURE_FS_NAME -p $AZURE_FS_DIR $AZURE_ACCT_KEY &> /dev/null; then
+      logerror "Cannot access Azure Cloud Storage blob ${AZURE_STORAGE_ACCOUNT} make sure it exists"
+      exit 1
+  fi
+}
+
+function list_all_backups() {
+  AZBLOB_LS=""
+  echo  ${AZUTIL} storage directory list --name ${AZURE_FS_DIR} -s $AZURE_FS_NAME
+  AZBLOB_LS_DIRS=$(  ${AZUTIL} storage directory list --name ${AZURE_FS_DIR} -s $AZURE_FS_NAME $AZURE_ACCT_KEY | grep '"name"' | awk '{print $2}' )
+  loginfo "Directories in the folder: $AZBLOB_LS_DIRS"
+  for dir in ${AZBLOB_LS_DIRS//[\",]/}; do
+  loginfo "Checking subdirecory: ${AZURE_FS_DIR}/${dir}"
+  SNAPINCS=$( ${AZUTIL} storage directory list --name ${AZURE_FS_DIR}/${dir} -s $AZURE_FS_NAME $AZURE_ACCT_KEY | grep '"name"' | awk '{print $2}' )
+  for snapinc in ${SNAPINCS//[\",]/}; do
+     FILES=$( ${AZUTIL} storage file list --path ${AZURE_FS_DIR}/${dir}/${snapinc} -s $AZURE_FS_NAME $AZURE_ACCT_KEY | grep '"name"' | awk '{print $2}' )
+     for file in ${FILES//[\",]/}; do
+        AZBLOB_LS="$AZBLOB_LS
+           ${AZURE_FS_DIR}/${dir}/${snapinc}/$file"
+       done;
+     done;
+  done;
+}
+
 # Validate that all configuration options are correct and no conflicting options are set
 function validate() {
+  loginfo "Validate settings ..."
   touch_logfile
   single_script_check
   set_auth_string
   verbose_vars
   loginfo "***************VALIDATING INPUT******************"
-  if [ -z ${GSUTIL} ]; then
-    logerror "Cannot find gsutil utility please make sure it is in the PATH"
-    exit 1
-  fi
-  if [ -z ${GCS_BUCKET} ]; then
-      logerror "Please pass in the GCS Bucket to use with this script"
-      exit 1
-  else
-      if ! ${GSUTIL} ls ${GCS_BUCKET} &> /dev/null; then
-        logerror "Cannot access Google Cloud Storage bucket ${GCS_BUCKET} make sure" \
-        " it exists"
-        exit 1
-      fi
-  fi
+  prepare_az_storage
   if [ ${ACTION} != "inventory" ]; then
     if [ -z ${NODETOOL} ]; then
       logerror "Cannot find nodetool utility please make sure it is in the PATH"
@@ -329,58 +390,70 @@ function validate() {
       logerror "The tar and nice utilities must be present to win."
     fi
     if [ ${ACTION} = "restore" ]; then
-      GCS_LS=$(${GSUTIL} ls ${GCS_BUCKET} | head -n1)
-      loginfo "GCS first file listed: ${GCS_LS}"
-      if  grep -q 'incr' <<< "${GCS_LS}"; then
-        loginfo "Detected incremental backup requested for restore. This script " \
-        "will only download the files locally"
+
+      # make sure user pass in the 
+      if [ -z ${AZURE_BACKUP_DIR} ]; then
+      logerror "Please pass --backup-path to the snapshot folder in azure to use with this script"
+         exit 1
+      fi
+
+      FILES=$( ${AZUTIL} storage file list --path ${AZURE_BACKUP_DIR} -s $AZURE_FS_NAME $AZURE_ACCT_KEY | grep '"name"' | awk '{print $2}' )
+      AZBLOB_LS=""
+      for file in ${FILES//[\",]/}; do
+          AZBLOB_LS="$AZBLOB_LS ${AZURE_BACKUP_DIR}/$file"
+      done;
+
+      loginfo "Azure blob first file listed: ${AZBLOB_LS}"
+      if  grep -q 'incr' <<< "${AZBLOB_LS}"; then
+        loginfo "Detected incremental backup requested for restore. This script will only download the files locally"
         DOWNLOAD_ONLY=true
         INCREMENTAL=true
         SUFFIX="incr"
       else
-        if grep -q 'snpsht' <<< "${GCS_LS}"; then
+        if grep -q 'snpsht' <<< "${AZBLOB_LS}"; then
           loginfo "Detected full snapshot backup requested for restore."
         else
-          logerror "Detected a Google Cloud Storage bucket path that is not a backup" \
-          " location. Make sure the --gcsbucket e is the full path to a specific backup"
+          logerror "Detected a Azure Cloud Storage bucket path that is not a backup" \
+          " location. Make sure the --backup-path is the full path to a specific backup"
         fi
       fi
-      if grep -q "tgz" <<< "${GCS_LS}"; then
+      if grep -q "tgz" <<< "${AZBLOB_LS}"; then
         loginfo "Detected compressed .tgz file for restore"
         COMPRESSION=true
         TAR_EXT="tgz"
         TAR_CFLAG="-z"
       fi
-      if  grep -q "tbz" <<< "${GCS_LS}"; then
+      if  grep -q "tbz" <<< "${AZBLOB_LS}"; then
         loginfo "Detected compressed .tbz file for restore"
         COMPRESSION=true
         TAR_EXT="tbz"
         TAR_CFLAG="-j"
       fi
-      if  grep -q "tar" <<< "${GCS_LS}"; then
+      if  grep -q "tar" <<< "${AZBLOB_LS}"; then
         loginfo "Detected uncompressed .tar file for restore"
         COMPRESSION=false
         TAR_EXT="tar"
         TAR_CFLAG=""
       fi
-      RESTORE_FILE=$(awk -F"/" '{print $NF}' <<< "${GCS_LS}")
+      RESTORE_FILE=$(awk -F"/" '{print $NF}' <<< "${AZBLOB_LS}")
+      loginfo "Restore file name is $RESTORE_FILE"
       if [[ "${RESTORE_FILE}" != *.${TAR_EXT} ]] ; then
           #Detect Split Files${TAR_EXT}-
           if [[ "${RESTORE_FILE}" ==  ${TAR_EXT}-* ]]; then
             SPLIT_FILE=true
             loginfo "Split file restore detected"
           else
-            logerror "Restore is not a tar file  ${GCS_BUCKET}"
+            logerror "Restore is not a tar file  ${AZURE_BACKUP_DIR}"
           fi
       fi
-      if [[ ! ${GCS_BUCKET} =~ ^.*\.${TAR_EXT}$ ]]; then
+      if [[ ! ${AZURE_BACKUP_DIR} =~ ^.*\.${TAR_EXT}$ ]]; then
         if ${SPLIT_FILE}; then
           #remove the trailing digits and replace the suffix
           RESTORE_FILE="${RESTORE_FILE%${SUFFIX}*}${SUFFIX}*"
-          GCS_BUCKET="${GCS_BUCKET%/}/${RESTORE_FILE}"
+          AZURE_BACKUP_DIR="${AZURE_BACKUP_DIR%/}/${RESTORE_FILE}"
         else
-          GCS_BUCKET="${GCS_BUCKET%/}/${RESTORE_FILE}"
-          loginfo "Fixed up restore bucket path: ${GCS_BUCKET}"
+          AZURE_BACKUP_DIR="${AZURE_BACKUP_DIR%/}/${RESTORE_FILE}"
+          loginfo "Fixed up restore bucket path: $AZURE_BACKUP_DIR"
         fi
       fi
 
@@ -436,6 +509,11 @@ function validate() {
 function verbose_vars() {
   logverbose "************* PRINTING VARIABLES ****************\n"
   logverbose "ACTION: ${ACTION}"
+  logverbose "AZURE_FS_DIR: ${AZURE_FS_DIR}"
+  logverbose "AZURE_FS_NAME: ${AZURE_FS_NAME}"
+  logverbose "AZURE_STORAGE_ACCOUNT: ${AZURE_STORAGE_ACCOUNT}"
+  logverbose "AZUTIL: ${AZUTIL}"
+  logverbose "AZURE_BACKUP_DIR: ${AZURE_BACKUP_DIR}"
   logverbose "AUTO_RESTART: ${AUTO_RESTART}"
   logverbose "BACKUP_DIR: ${BACKUP_DIR}"
   logverbose "CASSANDRA_PASS: ${CASSANDRA_PASS}"
@@ -451,9 +529,6 @@ function verbose_vars() {
   logverbose "DOWNLOAD_ONLY: ${DOWNLOAD_ONLY}"
   logverbose "DRY_RUN: ${DRY_RUN}"
   logverbose "FORCE_RESTORE: ${FORCE_RESTORE}"
-  logverbose "GCS_BUCKET: ${GCS_BUCKET}"
-  logverbose "GCS_TMPDIR: ${GCS_TMPDIR}"
-  logverbose "GSUTIL: ${GSUTIL}"
   logverbose "HOSTNAME: ${HOSTNAME}"
   logverbose "INCREMENTAL: ${INCREMENTAL}"
   logverbose "INCLUDE_CACHES: ${INCLUDE_CACHES}"
@@ -481,41 +556,48 @@ function verbose_vars() {
 
 # Check that script is not running more than once
 function single_script_check() {
-  local grep_script
-  #wraps a [] around the first letter to trick the grep statement into ignoring itself
-  grep_script="$(echo ${SCRIPT_NAME} | sed 's/^/\[/' | sed 's/^\(.\{2\}\)/\1\]/')"
-  logverbose "checking that script isn't already running"
-  logverbose "grep_script: ${grep_script}"
-  status="$(ps -feww | grep -w \"${grep_script}\" \
-    | awk -v pid=$$ '$2 != pid { print $2 }')"
-  if [ ! -z "${status}" ]; then
+  pid=" $$ "
+  loginfo "Check to make sure not running ${SCRIPT_NAME} $pid"
+  status=$( ps -elfj | grep "bash" | grep "${SCRIPT_NAME}" | grep -v $pid | wc -l)
+  loginfo "Checking number of other instance running: $status"
+  if [ ${status} -gt 0 ]; then
+    ps -elfj | grep "bash" | grep "${SCRIPT_NAME}" | grep -v $pid
     logerror " ${SCRIPT_NAME} : Process is already running. Aborting"
     exit 1;
   fi
+  loginfo "No duplicate instance found, continue the script"
 }
 
 # Create the log file if requested
 function touch_logfile() {
+  loginfo "touching logfiles ${LOG_FILE} by touch_logfile()"
   if [ "${LOG_OUTPUT}" = true ] && [ ! -f "${LOG_FILE}" ]; then
     touch "${LOG_FILE}"
   fi
 }
 
-# List available backups in GCS
+# List available backups in azure fileshare
 function inventory() {
-  loginfo "Available Snapshots:"
-  ${GSUTIL} ls -d "${GCS_BUCKET}/backups/${HOSTNAME}/snpsht/*"
+  loginfo "Checkining inventory of available snapshots:"
+  ${AZUTIL} storage directory list --name ${AZURE_FS_DIR}/snpsht -s $AZURE_FS_NAME $AZURE_ACCT_KEY | grep '"name"'
   if [ -z $incremental_backups ] || [ $incremental_backups = false ]; then
     loginfo "Incremental Backups are not enabled for Cassandra"
   fi
-  loginfo "Available Incremental Backups:"
-  ${GSUTIL} ls -d "${GCS_BUCKET}/backups/${HOSTNAME}/incr/*"
+  loginfo "CHECKING incremental backups: $AZUTIL storage directory exists -n $AZURE_FS_DIR -s $AZURE_FS_NAME"
+  incdir=$($AZUTIL storage directory exists -n $AZURE_FS_DIR/incr -s $AZURE_FS_NAME $AZURE_ACCT_KEY | grep true | wc -l)
+  if [ $incdir -eq 0 ]; then
+     loginfo "No incremental result"
+  else 
+     loginfo "Listing incremental result by: ${AZUTIL} storage directory list --name ${AZURE_FS_DIR}/incr -s $AZURE_FS_NAME"
+     ${AZUTIL} storage directory list --name ${AZURE_FS_DIR}/incr -s $AZURE_FS_NAME $AZURE_ACCT_KEY | grep '"name"'
+  fi
 }
 
 # This is the main backup function that orchestrates all the options
-# to create the backup set and then push it to GCS
+# to create the backup set and then push it to azure storage file share
 function backup() {
-  create_gcs_backup_path
+  loginfo "Starting backup()"
+  create_storage_path
   clear_backup_file_list
   if ${CLEAR_SNAPSHOTS}; then
     clear_snapshots
@@ -534,7 +616,7 @@ function backup() {
   else
     archive_compress
   fi
-  copy_to_gcs
+  copy_to_azure_fileshare
   save_last_inc_backup_time
   backup_cleanup
   if ${CLEAR_INCREMENTALS}; then
@@ -625,21 +707,38 @@ function parse_yaml() {
 
 # If a username and password is required for cqlsh and nodetool
 function set_auth_string() {
+  loginfo "Reading ${USE_AUTH} to call set_auth_string()"
   if ${USE_AUTH}; then
     if [ -n "${USER_FILE}" ] && [ -f "${USER_FILE}" ]; then
+      loginfo "Reading ${USER_FILE}"  
       source "${USER_FILE}"
+      if [ ${#AZURE_STORAGE_ACCOUNT} -gt 0 ]; then      
+         loginfo "AZURE storage account is: ${AZURE_STORAGE_ACCOUNT}"
+         if [ ${#AZURE_STORAGE_KEY} -gt 0 ]; then 
+             AZURE_ACCT_KEY="--account-name ${AZURE_STORAGE_ACCOUNT} --account-key ${AZURE_STORAGE_KEY}"
+         else 
+             AZURE_ACCT_KEY="--account-name ${AZURE_STORAGE_ACCOUNT} --sas-token ${AZURE_STORAGE_SAS_TOKEN}"
+         fi
+      fi
+      if [ ${#CASSANDRA_USER} -gt 0 ]; then
+         loginfo "CASSANDRA USER: #${CASSANDRA_USER}#"
+         USER_OPTIONS=" -u ${CASSANDRA_USER} --password ${CASSANDRA_PASS} "
+      fi 
     fi
-    if [ -z "${CASSANDRA_USER}" ] || [ -z "${CASSANDRA_PASS}" ]; then
-      logerror "Cassandra authentication values are missing or empty CASSANDRA_USER or CASSANDRA_PASS"
-    fi
-    USER_OPTIONS=" -u ${CASSANDRA_USER} --password ${CASSANDRA_PASS} "
   fi
 }
 
 # Set the backup path bucket URL
-function create_gcs_backup_path() {
-  GCS_BACKUP_PATH="${GCS_BUCKET}/backups/${HOSTNAME}/${SUFFIX}/${DATE}/"
-  loginfo "Will use target backup directory: ${GCS_BACKUP_PATH}"
+function create_storage_path() {
+  STORAGE_PATH="${AZURE_FS_DIR}/${SUFFIX}/${DATE}"
+  loginfo "Will use target backup directory: ${STORAGE_PATH}"
+    if ${DRY_RUN}; then
+      loginfo "DRY RUN: ${AZUTIL} storage directory create -n ${AZURE_FS_DIR}/${SUFFIX} -s ${AZURE_FS_NAME}"
+      loginfo "DRY RUN: ${AZUTIL} storage directory create -n ${STORAGE_PATH} -s ${AZURE_FS_NAME}"
+    else
+      ${AZUTIL} storage directory create -n ${AZURE_FS_DIR}/${SUFFIX} -s ${AZURE_FS_NAME} $AZURE_ACCT_KEY
+      ${AZUTIL} storage directory create -n ${STORAGE_PATH} -s ${AZURE_FS_NAME} $AZURE_ACCT_KEY
+    fi
 }
 
 # In case there is an existing backup file list, clear it out
@@ -651,6 +750,7 @@ function clear_backup_file_list() {
 # Use nodetool to take a snapshot with a specific name
 function take_snapshot() {
   loginfo "Taking Snapshot ${SNAPSHOT_NAME}"
+  loginfo "${NODETOOL} ${USER_OPTIONS} snapshot -t ${SNAPSHOT_NAME}"
   #later used to remove older incrementals
   SNAPSHOT_TIME=$(prepare_date "+%F %H:%M:%S")
   if ${DRY_RUN}; then
@@ -763,7 +863,7 @@ function archive_compress() {
 }
 
 #For large backup files, this will split the file into multiple smaller files
-#which allows for more efficient upload / download from Google Cloud Storage
+#which allows for more efficient upload / download from Azure Cloud Storage
 function split_archive() {
   loginfo "Compressing And splitting backup"
   local cmd
@@ -803,21 +903,23 @@ function clear_incrementals() {
   done
 }
 
-# Copy the backup files up to the GCS bucket
-function copy_to_gcs() {
-  loginfo "Copying files to ${GCS_BACKUP_PATH}"
+# Copy the backup files up to the azure fileshare
+function copy_to_azure_fileshare() {
+  loginfo "Copying files to ${STORAGE_PATH}"
   if ${DRY_RUN}; then
     if ${SPLIT_FILE}; then
-      loginfo "DRY RUN: ${GSUTIL} -m cp ${COMPRESS_DIR}/${SPLIT_FILE_SUFFIX}* ${GCS_BACKUP_PATH}"
+      loginfo "DRY RUN: ${AZUTIL} storage file upload-batch --source ${COMPRESS_DIR}/${SPLIT_FILE_SUFFIX}* --destination-path ${STORAGE_PATH} -s ${AZURE_FS_NAME}"
     else
-      loginfo "DRY RUN: ${GSUTIL} cp ${COMPRESS_DIR}/${ARCHIVE_FILE} ${GCS_BACKUP_PATH}"
+      loginfo "DRY RUN: ${AZUTIL} storage file upload --source ${COMPRESS_DIR}/${ARCHIVE_FILE} --path ${STORAGE_PATH} -s ${AZURE_FS_NAME}"
     fi
   else
     if ${SPLIT_FILE}; then
-      ${GSUTIL} -m cp "${COMPRESS_DIR}/${SPLIT_FILE_SUFFIX}*" "${GCS_BACKUP_PATH}"
+      loginfo "${AZUTIL} storage file upload-batch --source ${COMPRESS_DIR} --destination-path ${STORAGE_PATH} -s ${AZURE_FS_NAME}"
+      $( ${AZUTIL} storage file upload-batch --source ${COMPRESS_DIR} --destination-path ${STORAGE_PATH} -s ${AZURE_FS_NAME} $AZURE_ACCT_KEY )
     else
-      ${GSUTIL} cp "${COMPRESS_DIR}/${ARCHIVE_FILE}" "${GCS_BACKUP_PATH}"
-    fi
+      loginfo "${AZUTIL} storage file upload --source ${COMPRESS_DIR}/${ARCHIVE_FILE} --path ${STORAGE_PATH} -s ${AZURE_FS_NAME}"
+      $( ${AZUTIL} storage file upload --source ${COMPRESS_DIR}/${ARCHIVE_FILE} --path ${STORAGE_PATH} -s ${AZURE_FS_NAME} $AZURE_ACCT_KEY )
+     fi
   fi
 }
 
@@ -869,40 +971,45 @@ function restore() {
 
 # Orchestrate the retrieval and extraction of the files to recover
 function restore_get_files() {
-  loginfo "Starting file retrieval process"
+  loginfo "Starting file retrieval process ${AZUTIL} storage file list at path ${AZURE_BACKUP_DIR} "
   if ${DRY_RUN}; then
     loginfo "DRY RUN: Would have cleared restore dir ${BACKUP_DIR}/restore/*"
   else
     rm -rf ${VERBOSE_RM} ${BACKUP_DIR}/restore/*
   fi
   if ${SPLIT_FILE}; then
-    restore_split_from_gcs
+    restore_split_from_azurestorage
   else
-    restore_compressed_from_gcs
+    restore_compressed_from_azurestorage
   fi
 
 }
 
-# Download uncompressed backup files from GCS
-function restore_split_from_gcs() {
-  loginfo "Downloading restore files from GCS"
-  if ${DRY_RUN}; then
-    loginfo "DRY RUN: ${GSUTIL} -m -r cp ${GCS_BUCKET} ${COMPRESS_DIR}"
-  else
-    ${GSUTIL} -m cp -r  "${GCS_BUCKET}" "${COMPRESS_DIR}"
-  fi
+# Download uncompressed backup files from Azure storage account
+function restore_split_from_azurestorage() {
+  loginfo "Downloading restore files from Azure storage ${AZUTIL} storage file list --path ${AZURE_BACKUP_DIR}"
+  FILES=$( ${AZUTIL} storage file list --path ${AZURE_BACKUP_DIR} -s $AZURE_FS_NAME $AZURE_ACCT_KEY | grep '"name"' | awk '{print $2}' )
+  echo $FILES
+  for file in ${FILES//[\",]/}; do
+    loginfo "Downloading file $file"
+    if ${DRY_RUN}; then
+      loginfo "DRY RUN: ${AZUTIL} storage file download --path ${AZURE_BACKUP_DIR}/$file --destination ${COMPRESS_DIR}"
+    else
+      ${AZUTIL} storage file download --path ${AZURE_BACKUP_DIR}/$file --destination ${COMPRESS_DIR} $AZURE_ACCT_KEY
+    fi
+  done;
   restore_split
 }
 
 # Retrieve the compressed backup file
-function restore_compressed_from_gcs() {
-    if ${DRY_RUN}; then
-      loginfo "DRY RUN: ${GSUTIL} cp ${GCS_BUCKET} ${COMPRESS_DIR}"
-    else
-       #copy the tar.gz file
-      ${GSUTIL} cp "${GCS_BUCKET}" "${COMPRESS_DIR}"
-    fi
-    restore_decompress
+function restore_compressed_from_azurestorage() {
+  loginfo "Downloading compressed files from Azure storage ${AZURE_BACKUP_DIR}"
+  if ${DRY_RUN}; then
+    loginfo "DRY RUN: ${AZUTIL} storage file download --path ${AZURE_BACKUP_DIR} --destination ${COMPRESS_DIR}"
+  else
+    ${AZUTIL} storage file download --path ${AZURE_BACKUP_DIR} -s $AZURE_FS_NAME $AZURE_ACCT_KEY --dest ${COMPRESS_DIR} $AZURE_ACCT_KEY
+  fi
+  restore_decompress
 }
 
 # Extract the compressed backup file
@@ -1111,12 +1218,14 @@ for arg in "$@"; do
     "inventory") set -- "$@" "-I" ;;
     "--alt-hostname")   set -- "$@" "-a" ;;
     "--auth-file") set -- "$@" "-U" ;;
-    "--gcsbucket") set -- "$@" "-b" ;;
+    "--az-storage") set -- "$@" "-A" ;;
+    "--backup-path") set -- "$@" "-b" ;;
     "--backupdir")   set -- "$@" "-d" ;;
     "--bzip")    set -- "$@" "-j" ;;
     "--clear-old-ss")   set -- "$@" "-c" ;;
     "--clear-old-inc")   set -- "$@" "-C" ;;
     "--download-only")   set -- "$@" "-D" ;;
+    "--endpoint-cqlsh")   set -- "$@" "-e" ;;
     "--force")   set -- "$@" "-f" ;;
     "--help") set -- "$@" "-h" ;;
     "--home-dir") set -- "$@" "-H" ;;
@@ -1124,6 +1233,7 @@ for arg in "$@"; do
     "--incremental") set -- "$@" "-i" ;;
     "--log-dir")   set -- "$@" "-l" ;;
     "--keep-old")   set -- "$@" "-k" ;;
+    "--storage-key")   set -- "$@" "-K" ;;
     "--noop")   set -- "$@" "-n" ;;
     "--nice")   set -- "$@" "-N" ;;
     "--service-name")   set -- "$@" "-S" ;;
@@ -1137,14 +1247,17 @@ for arg in "$@"; do
   esac
 done
 
-while getopts 'a:b:BcCd:DfhH:iIjkl:LnN:p:rs:S:T:u:U:vwy:z' OPTION
+while getopts 'a:A:b:BcCd:e:DfhH:iIjkK:l:LnN:p:rs:S:T:u:U:vwy:z' OPTION
 do
   case $OPTION in
       a)
           HOSTNAME=${OPTARG}
           ;;
       b)
-          GCS_BUCKET=${OPTARG%/}
+          AZURE_BACKUP_DIR=${OPTARG}
+          ;;
+      A)
+          AZURE_STORAGE_ACCOUNT=${OPTARG}
           ;;
       B)
           ACTION="backup"
@@ -1160,6 +1273,10 @@ do
           ;;
       D)
           DOWNLOAD_ONLY=true
+          ;;
+      e)
+          CQLSH_DEFAULT_HOST=${OPTARG}
+          echo "Using cqlsh endpoint: ${CQLSH_DEFAULT_HOST}"
           ;;
       f)
           FORCE_RESTORE=true
@@ -1186,13 +1303,16 @@ do
       k)
           KEEP_OLD_FILES=true
           ;;
+      K)
+          AZURE_STORAGE_KEY=${OPTARG}
+          ;;
       l)
           LOG_OUTPUT=true
           [ -d ${OPTARG} ] && LOG_DIR=${OPTARG%/}
           ;;
       L)
           INCLUDE_COMMIT_LOGS=true
-	        ;;
+            ;;
       n)
           DRY_RUN=true
           ;;
@@ -1246,6 +1366,11 @@ done
 ACTION=${ACTION:-backup} # either backup or restore
 AGE=5 #five minutes ago the last modified date of incremental backups to prune
 AUTO_RESTART=true #flag set to false if Cassandra is part of a cluster
+AZUTIL="$(which az)" #
+AZURE_FS_NAME="cassandradump" # name of the fileshare;
+AZURE_FS_DIR=$(hostname) # name of the fileshare directory in azure to use for dump;
+AZURE_ACCT_KEY="--account-name ${AZURE_STORAGE_ACCOUNT} --account-key ${AZURE_STORAGE_KEY}"
+# AZURE_BACKUP_DIR: input parameter of --backup-path
 BACKUP_DIR=${BACKUP_DIR:-/cassandra/backups} # Backups base directory
 BZIP=${BZIP:-false} #use bzip2 compression
 CASSANDRA_PASS=${CASSANDRA_PASS:-''} #Password for Cassandra CQLSH account
@@ -1256,14 +1381,13 @@ CLEAR_SNAPSHOTS=${CLEAR_SNAPSHOTS:-false} #clear old snapshots pre-snapshot
 COMPRESS_DIR=${COMPRESS_DIR:-${BACKUP_DIR}/compressed} #directory to house backup archive
 COMPRESSION=${COMPRESSION:-false} #flag to use tar+gz
 CQLSH="$(which cqlsh)" #which cqlsh command
-CQLSH_DEFAULT_HOST="127.0.0.1" #cqlsh host - currently hard coded
+CQLSH_DEFAULT_HOST=$(nodetool status | grep ^UN |awk 'NR==1{print $2}') #cqlsh host - currently hard coded
 DATE="$(prepare_date +%F_%H-%M )" #nicely formatted date string for files
 DOWNLOAD_ONLY=${DOWNLOAD_ONLY:-false} #user flag or used if incremental restore is requested
 DRY_RUN=${DRY_RUN:-false} #flag to only print what would have executed
 ERROR_COUNT=0 #used in validation step will exit if > 0
 FORCE_RESTORE=${FORCE_RESTORE:-false} #flag to bypass restore confirmation prompt
-GSUTIL="$(which gsutil)" #which gsutil script
-HOSTNAME=${HOSTNAME:-"$(hostname)"} #used for gcs backup location
+HOSTNAME=${HOSTNAME:-"$(hostname)"} #used for azure storage backup location
 INCLUDE_CACHES=${INCLUDE_CACHES:-false} #include the saved caches for posterity
 INCLUDE_COMMIT_LOGS=${INCLUDE_COMMIT_LOGS:-false} #include the commit logs for extra safety
 INCREMENTAL=${INCREMENTAL:-false}  # flag to indicate only incremental files
@@ -1302,5 +1426,6 @@ LAST_INC_BACKUP_TIME="" #used to keep track of the incremental backup time
 
 # Validate input
 validate
+
 # Execute the requested action
 eval $ACTION
