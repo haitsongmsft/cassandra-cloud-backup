@@ -186,7 +186,7 @@ options               list available options
 
 Examples:
   Take a full snapshot, gzip compress it with nice=15,
-  upload into the azure blob, and clear old incremental and snapshot files
+  upload into the azure file storage, and clear old incremental and snapshot files
   ./cassandra-azure-backup.sh -A myazstorageacct -K mystoragekey -zCc -N 15 backup
 
   Do a dry run of a full snapshot with verbose output and
@@ -294,24 +294,6 @@ function prepare_az_storage() {
   fi
 }
 
-function list_all_backups() {
-  AZBLOB_LS=""
-  echo  ${AZUTIL} storage directory list --name ${AZURE_FS_DIR} -s $AZURE_FS_NAME
-  AZBLOB_LS_DIRS=$(  ${AZUTIL} storage directory list --name ${AZURE_FS_DIR} -s $AZURE_FS_NAME $AZURE_ACCT_KEY | grep '"name"' | awk '{print $2}' )
-  loginfo "Directories in the folder: $AZBLOB_LS_DIRS"
-  for dir in ${AZBLOB_LS_DIRS//[\",]/}; do
-  loginfo "Checking subdirecory: ${AZURE_FS_DIR}/${dir}"
-  SNAPINCS=$( ${AZUTIL} storage directory list --name ${AZURE_FS_DIR}/${dir} -s $AZURE_FS_NAME $AZURE_ACCT_KEY | grep '"name"' | awk '{print $2}' )
-  for snapinc in ${SNAPINCS//[\",]/}; do
-     FILES=$( ${AZUTIL} storage file list --path ${AZURE_FS_DIR}/${dir}/${snapinc} -s $AZURE_FS_NAME $AZURE_ACCT_KEY | grep '"name"' | awk '{print $2}' )
-     for file in ${FILES//[\",]/}; do
-        AZBLOB_LS="$AZBLOB_LS
-           ${AZURE_FS_DIR}/${dir}/${snapinc}/$file"
-       done;
-     done;
-  done;
-}
-
 # Validate that all configuration options are correct and no conflicting options are set
 function validate() {
   loginfo "Validate settings ..."
@@ -393,7 +375,7 @@ function validate() {
 
       # make sure user pass in the 
       if [ -z ${AZURE_BACKUP_DIR} ]; then
-      logerror "Please pass --backup-path to the snapshot folder in azure to use with this script"
+         logerror "Please pass the fileshare path in azure storage via --backup-path"
          exit 1
       fi
 
@@ -403,7 +385,7 @@ function validate() {
           AZBLOB_LS="$AZBLOB_LS ${AZURE_BACKUP_DIR}/$file"
       done;
 
-      loginfo "Azure blob first file listed: ${AZBLOB_LS}"
+      loginfo "Azure storage file listed: ${AZBLOB_LS}"
       if  grep -q 'incr' <<< "${AZBLOB_LS}"; then
         loginfo "Detected incremental backup requested for restore. This script will only download the files locally"
         DOWNLOAD_ONLY=true
