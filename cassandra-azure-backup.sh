@@ -17,8 +17,8 @@
 #
 # Description :  Take snapshot and incremental backups of Cassandra and copy them to Azure Cloud Storage
 #                Optionally restore full system from snapshot
-# This is not an official Microsoft product.
 #
+
 VERSION='1.0'
 SCRIPT_NAME="cassandra-azure-backup.sh"
 #exit on any error
@@ -395,7 +395,7 @@ function validate() {
         if grep -q 'snpsht' <<< "${AZBLOB_LS}"; then
           loginfo "Detected full snapshot backup requested for restore."
         else
-          logerror "Detected a Azure Cloud Storage bucket path that is not a backup" \
+          logerror "Detected a Azure file share path that is not a backup" \
           " location. Make sure the --backup-path is the full path to a specific backup"
         fi
       fi
